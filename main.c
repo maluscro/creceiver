@@ -102,7 +102,7 @@ void receive_events( int a_socket_fd )
   {
     char* full_event = receive_full_event( a_socket_fd );
 
-    printf( "An event has been received: '%s'\n", full_event );
+    //printf( "An event has been received: '%s'\n", full_event );
   }
 }
 
