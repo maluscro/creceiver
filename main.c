@@ -9,8 +9,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define MAXEVENTSIZE 200
-
 #define BUFFERSIZE 64000
 
 char  g_buffer[ BUFFERSIZE ];
@@ -19,8 +17,6 @@ char* gp_read_end   = g_buffer; // End of the buffer 'read area'
 
 const char* g_error_msg =
     "It was not possible to start listening to incoming connections";
-
-char g_auxiliar_buffer[ MAXEVENTSIZE ];
 
 char* get_event_in_buffer( )
 {
