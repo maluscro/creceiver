@@ -7,20 +7,113 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#define __USE_XOPEN
+#include <time.h>
 #include <unistd.h>
 
+#define TIMESTAMPSIZE_BODY 19
+#define TIMESTAMPSIZE_EXTENSION 6
 #define BUFFERSIZE 64000
 
-char  g_buffer[ BUFFERSIZE ];
-char* gp_read_begin = g_buffer; // Beginning of the buffer 'read area'
-char* gp_read_end   = g_buffer; // End of the buffer 'read area'
+/*
+ * This receiver operates over a memory buffer named g_buffer, of BUFFERSIZE
+ * size. Events are produced and consumed into and from the so called 'read
+ * window' of the buffer. The event data streams in from a STREAM socket.
+ *
+ * The read window is defined by the gp_read_begin and gp_read_end pointers.
+ * When a new event is requested, it is consumed from this read window (if any).
+ * If there are no complete events in the window, new data is requested from the
+ * socket and put at the end of the read window (i.e. the read window decreases
+ * by its beginning when an event is consumed, and grows by its end when new
+ * event info is retrieved from the socket).
+ *
+ * Note that, when data is retrieved from the socket, there is no guarantee that
+ * events will be received complete.
+ *
+ * When the read window gets to the end of the buffer, its current contents are
+ * swapped to the beginning.
+ */
 
-const char* g_error_msg =
+static char  g_buffer[ BUFFERSIZE ];
+static char* gp_read_begin = g_buffer; // Beginning of the buffer 'read window'
+static char* gp_read_end   = g_buffer; // End of the buffer 'read window'
+
+static const char* g_error_msg =
     "It was not possible to start listening to incoming connections";
+
+int timestamp_rfc3339( char* ap_output_buffer )
+{
+  int to_return = -1;
+
+  // Fetch no. of seconds passed since epoch, and no. of nanoseconds into the
+  // next second.
+  struct timespec time_spec;
+  if( clock_gettime( CLOCK_REALTIME, &time_spec ) == 0 )
+  {
+    // Load a tm struct with those seconds
+    struct tm time;
+    if( localtime_r( &time_spec.tv_sec, &time ) != NULL )
+    {
+      // Format the output string from the tm struct
+      size_t num_chars_copied = strftime( ap_output_buffer,
+                                          28,
+                                          "%FT%T.",
+                                          &time);
+
+      // Add the number of microseconds into the next second
+      snprintf( &( ap_output_buffer[ num_chars_copied ] ),
+                28 - num_chars_copied,
+                "%.6ldZ",
+                ( time_spec.tv_nsec / 1000 ) );
+
+      to_return = 0;
+    }
+  }
+
+  return to_return;
+}
+
+long message_latency( const char* a_message )
+{
+  long to_return = -1;
+
+  // Extract the time information from the message
+  char* p_time_start = strchr( a_message, '>' );
+  if( p_time_start != NULL )
+  {
+    // Fetch the number of seconds from epoch
+    struct timespec time_spec;
+    if( clock_gettime( CLOCK_REALTIME, &time_spec ) == 0 )
+    {
+      char time_stamp_body[ TIMESTAMPSIZE_BODY + 1 ];
+      memcpy( time_stamp_body, p_time_start + 1, TIMESTAMPSIZE_BODY );
+      time_stamp_body[ TIMESTAMPSIZE_BODY ] = '\0';
+
+      struct tm time;
+      strptime( time_stamp_body, "%FT%T", &time );
+
+      long diff_seconds = time_spec.tv_sec - mktime( &time );
+
+      char time_stamp_extension[ TIMESTAMPSIZE_EXTENSION + 1 ];
+      memcpy( time_stamp_extension,
+              p_time_start + 1 + TIMESTAMPSIZE_BODY + 1,
+              TIMESTAMPSIZE_EXTENSION );
+      time_stamp_extension[ TIMESTAMPSIZE_EXTENSION ] = '\n';
+
+      long diff_microseconds =
+          ( time_spec.tv_nsec / (long ) 1e3 ) - atol( time_stamp_extension );
+
+      to_return = ( diff_seconds * ( long ) 1e6 ) + diff_microseconds;
+    }
+  }
+
+  return to_return;
+}
+
 
 char* get_event_in_buffer( )
 {
-  // Is there a full event in the read area of the buffer?
+  // Is there a full event in the read window of the buffer?
   char* event_end = strchr( gp_read_begin, '\n' );
 
   if( event_end != NULL )
@@ -29,8 +122,8 @@ char* get_event_in_buffer( )
     // able to be handled as a string
     *event_end = '\0';
 
-    // Return the beginning of the just found event. Update the read area of the
-    // buffer, setting it just one byte after the found event.
+    // Return the beginning of the just found event. Update the read window of
+    // the buffer, setting it just one byte after the found event.
     char* to_return = gp_read_begin;
     gp_read_begin = event_end + 1;
 
@@ -43,24 +136,27 @@ char* get_event_in_buffer( )
 }
 
 
-void receive_data( int a_socket_fd )
+ssize_t receive_data( int a_socket_fd )
 {
-  // If the read area is already at the end of the buffer, swap  it to the
+  // If the read window is already at the end of the buffer, swap  it to the
   // beggining of it.
   bool swapping_was_done = false;
   if( gp_read_end == g_buffer + BUFFERSIZE )
   {
-    size_t read_area_size = gp_read_end - gp_read_begin;
-    memmove( g_buffer, gp_read_begin, read_area_size );
+    size_t read_window_size = ( size_t ) ( gp_read_end - gp_read_begin );
+    memmove( g_buffer, gp_read_begin, read_window_size );
     gp_read_begin = g_buffer;
-    gp_read_end = g_buffer + read_area_size;
+    gp_read_end = g_buffer + read_window_size;
 
     swapping_was_done = true;
   }
 
-  // Receive, after the read area. Update read area definition.
-  int num_bytes_received =
-      recv( a_socket_fd, gp_read_end, g_buffer + BUFFERSIZE - gp_read_end, 0 );
+  // Receive, after the read window. Update read window definition.
+  ssize_t num_bytes_received =
+      recv( a_socket_fd,
+            gp_read_end,
+            ( size_t )( g_buffer + BUFFERSIZE - gp_read_end ),
+            0 );
 
   if( num_bytes_received != -1 )
   {
@@ -70,8 +166,12 @@ void receive_data( int a_socket_fd )
   if( swapping_was_done )
   {
     // Clear possible already consumed information
-    memset( gp_read_end, '\0', BUFFERSIZE - ( gp_read_end - gp_read_begin ) );
+    memset( gp_read_end,
+            '\0',
+            ( size_t )( BUFFERSIZE - ( gp_read_end - gp_read_begin ) ) );
   }
+
+  return num_bytes_received;
 }
 
 
@@ -80,12 +180,18 @@ char* receive_full_event( int a_socket_fd )
   // Is there an event already in the buffer?
   char* event_in_buffer = get_event_in_buffer( );
 
-  // Keep receiving information until there is one
+  // Keep receiving information until there is one, or the connection is closed
+  // by the peer
   while( event_in_buffer == NULL )
   {
-    receive_data( a_socket_fd );
-
-    event_in_buffer = get_event_in_buffer();
+    if( receive_data( a_socket_fd ) != 0 )
+    {
+      event_in_buffer = get_event_in_buffer();
+    }
+    else
+    {
+      break;
+    }
   }
 
   return event_in_buffer;
@@ -93,25 +199,35 @@ char* receive_full_event( int a_socket_fd )
 
 
 void receive_events( int a_socket_fd )
-{
+{    
   while( 1 )
   {
     char* full_event = receive_full_event( a_socket_fd );
 
-    //printf( "An event has been received: '%s'\n", full_event );
+    if( full_event != NULL )
+    {
+      printf( "Latency: %ld\n", message_latency( full_event ) );
+    }
+    else
+    {
+      printf( "The connection has been closed by peer. Abandoning.\n\n");
+      break;
+    }
   }
 }
 
 
-void* get_in_addr( const struct sockaddr* a_socket_address )
+void* get_in_addr( struct sockaddr* ap_socket_address )
 {
+  void* p_socket_address = ( void* ) ap_socket_address;
+
   // IPv4 or IPv6?
-  if ( a_socket_address->sa_family == AF_INET)
+  if ( ap_socket_address->sa_family == AF_INET)
   {
-    return &( ( ( struct sockaddr_in* )a_socket_address )->sin_addr );
+    return &( ( ( struct sockaddr_in* )p_socket_address )->sin_addr );
   }
 
-  return &( ( ( struct sockaddr_in6* )a_socket_address )->sin6_addr );
+  return &( ( ( struct sockaddr_in6* )p_socket_address )->sin6_addr );
 }
 
 
