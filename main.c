@@ -41,6 +41,7 @@ static char* gp_read_end   = g_buffer; // End of the buffer 'read window'
 static const char* g_error_msg =
     "It was not possible to start listening to incoming connections";
 
+
 int timestamp_rfc3339( char* ap_output_buffer )
 {
   int to_return = -1;
@@ -73,38 +74,40 @@ int timestamp_rfc3339( char* ap_output_buffer )
   return to_return;
 }
 
-long message_latency( const char* a_message )
+
+long message_latency( const char* a_message,
+                      const struct timespec* ap_time_spec )
 {
   long to_return = -1;
 
-  // Extract the time information from the message
   char* p_time_start = strchr( a_message, '>' );
   if( p_time_start != NULL )
   {
-    // Fetch the number of seconds from epoch
-    struct timespec time_spec;
-    if( clock_gettime( CLOCK_REALTIME, &time_spec ) == 0 )
-    {
-      char time_stamp_body[ TIMESTAMPSIZE_BODY + 1 ];
-      memcpy( time_stamp_body, p_time_start + 1, TIMESTAMPSIZE_BODY );
-      time_stamp_body[ TIMESTAMPSIZE_BODY ] = '\0';
+    // Extract the time information body from the message
+    char time_stamp_body[ TIMESTAMPSIZE_BODY + 1 ];
+    memcpy( time_stamp_body, p_time_start + 1, TIMESTAMPSIZE_BODY );
+    time_stamp_body[ TIMESTAMPSIZE_BODY ] = '\0';
 
-      struct tm time;
-      strptime( time_stamp_body, "%FT%T", &time );
+    struct tm time;
+    strptime( time_stamp_body, "%FT%T", &time );
 
-      long diff_seconds = time_spec.tv_sec - mktime( &time );
+    // Calculate second difference between emission and current times
+    long diff_seconds = ap_time_spec->tv_sec - mktime( &time );
 
-      char time_stamp_extension[ TIMESTAMPSIZE_EXTENSION + 1 ];
-      memcpy( time_stamp_extension,
-              p_time_start + 1 + TIMESTAMPSIZE_BODY + 1,
-              TIMESTAMPSIZE_EXTENSION );
-      time_stamp_extension[ TIMESTAMPSIZE_EXTENSION ] = '\n';
+    // Extract the time information extension from the message. The extension
+    // contains the number of microseconds into the next second.
+    char time_stamp_extension[ TIMESTAMPSIZE_EXTENSION + 1 ];
+    memcpy( time_stamp_extension,
+            p_time_start + 1 + TIMESTAMPSIZE_BODY + 1,
+            TIMESTAMPSIZE_EXTENSION );
+    time_stamp_extension[ TIMESTAMPSIZE_EXTENSION ] = '\n';
 
-      long diff_microseconds =
-          ( time_spec.tv_nsec / (long ) 1e3 ) - atol( time_stamp_extension );
+    // Calculate microsecond difference between emission and current times
+    long diff_microseconds =
+        ( ap_time_spec->tv_nsec / (long ) 1e3 ) - atol( time_stamp_extension );
 
-      to_return = ( diff_seconds * ( long ) 1e6 ) + diff_microseconds;
-    }
+    // Return sum of differences
+    to_return = ( diff_seconds * ( long ) 1e6 ) + diff_microseconds;
   }
 
   return to_return;
@@ -116,7 +119,8 @@ char* get_event_in_buffer( )
   // Is there a full event in the read window of the buffer?
   char* event_end = strchr( gp_read_begin, '\n' );
 
-  if( event_end != NULL )
+  if( ( event_end != NULL )  &&
+      ( event_end < g_buffer + BUFFERSIZE ) )
   {
     // Replace the '\n' end mark with a null character, for the result to be
     // able to be handled as a string
@@ -174,24 +178,151 @@ ssize_t receive_data( int a_socket_fd )
   return num_bytes_received;
 }
 
+void actually_print_statistics( const char* a_message,
+                                const long* ap_num_events_received,
+                                const long* ap_num_events_to_dismiss,
+                                const long* ap_num_packets_received,
+                                const long* ap_num_packets_to_dismiss )
+{
+  static long last_call_second = -1;
+  static long num_seconds_from_beginning = -1;
+  static long total_latencies = 0;
+  static long num_calls = 0;
+
+  if( a_message == NULL )
+  {
+    return;
+  }
+
+  struct timespec time_spec;
+  if( clock_gettime( CLOCK_REALTIME, &time_spec ) == 0 )
+  {
+    if( time_spec.tv_sec != last_call_second )
+    {
+      num_calls++;
+      total_latencies += message_latency( a_message, &time_spec );
+
+      // Since we are printing the number of events and packets per second,
+      // we need a full second to have passed in order to be able to print
+      // meaningful info.
+      if( num_seconds_from_beginning > 0 )
+      {
+        long events_to_consider_per_sec =
+            ( *ap_num_events_received - *ap_num_events_to_dismiss );
+        long packets_to_consider_per_sec =
+            ( *ap_num_packets_received - *ap_num_packets_to_dismiss );
+
+        printf( "Received %10ld packets (%7ld/sec), %10ld events (%7ld/sec), "
+                "events/packet: %.3lf, avg latency: %.1lf \u00B5s\n",
+                *ap_num_packets_received,
+                packets_to_consider_per_sec /
+                num_seconds_from_beginning,
+                *ap_num_events_received,
+                events_to_consider_per_sec /
+                num_seconds_from_beginning,
+                ( double ) *ap_num_events_received /
+                ( double ) *ap_num_packets_received,
+                ( double ) total_latencies /
+                (double ) num_calls );
+      }
+
+      num_seconds_from_beginning++;
+    }
+
+    last_call_second = time_spec.tv_sec;
+  }
+}
+
+
+void print_statistics( const char* a_message,
+                       const long* ap_num_events_received,
+                       const long* ap_num_packets_received )
+{
+  static long num_second_changes = -1;
+  static long last_call_second = -1;
+  static long num_initial_events_to_dismiss = 0;
+  static long num_initial_packets_to_dismiss = 0;
+
+  // This function will be called for the first time somewhere in the middle
+  // of a given second. We want that initial partial second to pass without
+  // actually printing statistics.
+  if( num_second_changes == 1 )
+  {
+    actually_print_statistics
+        ( a_message,
+          ap_num_events_received,
+          &num_initial_events_to_dismiss,
+          ap_num_packets_received,
+          &num_initial_packets_to_dismiss );
+  }
+  else
+  {
+    struct timespec time_spec;
+    if( clock_gettime( CLOCK_REALTIME, &time_spec ) == 0 )
+    {
+      if( time_spec.tv_sec != last_call_second )
+      {
+        num_second_changes++;
+      }
+
+      last_call_second = time_spec.tv_sec;
+
+      if( num_second_changes == 1 )
+      {
+        // Once the initial partial second has passed, note how many events and
+        // packets we don't want to consider when calculating number of packets
+        // and events per second (i.e. the ones that have been sent during that
+        // initial partial second).
+        num_initial_events_to_dismiss = *ap_num_events_received;
+        num_initial_packets_to_dismiss = *ap_num_packets_received;
+      }
+    }
+  }
+}
+
 
 char* receive_full_event( int a_socket_fd )
 {
+  static long num_events_received = 0;
+  static long num_packets_received = 0;
+
   // Is there an event already in the buffer?
   char* event_in_buffer = get_event_in_buffer( );
 
   // Keep receiving information until there is one, or the connection is closed
   // by the peer
+  ssize_t num_bytes_received = 0;
   while( event_in_buffer == NULL )
   {
-    if( receive_data( a_socket_fd ) != 0 )
+    num_bytes_received = receive_data( a_socket_fd );
+
+    if( num_bytes_received > 0 )
     {
       event_in_buffer = get_event_in_buffer();
+
+      num_packets_received++;
     }
     else
     {
-      break;
+      if( num_bytes_received == 0 )
+      {
+        // Receiving zero bytes means that the connection was closed
+        break;
+      }
+      else
+      {
+        perror( "It was not possible to receive data from peer" );
+      }
     }
+  }
+
+  if( event_in_buffer != NULL )
+  {
+    num_events_received++;
+
+    print_statistics( event_in_buffer,
+                      &num_events_received,
+                      &num_packets_received );
   }
 
   return event_in_buffer;
@@ -199,16 +330,10 @@ char* receive_full_event( int a_socket_fd )
 
 
 void receive_events( int a_socket_fd )
-{    
+{
   while( 1 )
   {
-    char* full_event = receive_full_event( a_socket_fd );
-
-    if( full_event != NULL )
-    {
-      printf( "Latency: %ld\n", message_latency( full_event ) );
-    }
-    else
+    if( receive_full_event( a_socket_fd ) == NULL )
     {
       printf( "The connection has been closed by peer. Abandoning.\n\n");
       break;
