@@ -179,11 +179,10 @@ ssize_t receive_data( int a_socket_fd )
   return num_bytes_received;
 }
 
-void actually_print_statistics( const char* a_message,
-                                const long* ap_num_events_received,
-                                const long* ap_num_events_to_dismiss,
-                                const long* ap_num_packets_received,
-                                const long* ap_num_packets_to_dismiss )
+
+void print_statistics( const char* a_message,
+                       const long* ap_num_events_received,
+                       const long* ap_num_packets_received )
 {
   static long last_call_second = -1;
   static long num_seconds_from_beginning = -1;
@@ -198,7 +197,7 @@ void actually_print_statistics( const char* a_message,
   if( clock_gettime( CLOCK_REALTIME, &time_spec ) == 0 )
   {
     if( time_spec.tv_sec != last_call_second )
-    {      
+    {
       num_seconds_from_beginning++;
       total_latencies += message_latency( a_message, &time_spec );
 
@@ -208,20 +207,15 @@ void actually_print_statistics( const char* a_message,
       if( num_seconds_from_beginning >= 1 &&
           num_seconds_from_beginning % STATISTICS_INTERVAL == 0 )
       {
-        long events_to_consider_per_sec =
-            ( *ap_num_events_received - *ap_num_events_to_dismiss );
-        long packets_to_consider_per_sec =
-            ( *ap_num_packets_received - *ap_num_packets_to_dismiss );
-
         printf( "%4ld sec. Received %10ld packets (%6ld/sec), %10ld events "
                 "(%6ld/sec), events/packet: %.3lf, avg latency: %.1lf "
                 "\u00B5s\n",
                 num_seconds_from_beginning,
                 *ap_num_packets_received,
-                packets_to_consider_per_sec /
+                *ap_num_packets_received /
                 num_seconds_from_beginning,
                 *ap_num_events_received,
-                events_to_consider_per_sec /
+                *ap_num_events_received /
                 num_seconds_from_beginning,
                 ( double ) *ap_num_events_received /
                 ( double ) *ap_num_packets_received,
@@ -231,53 +225,6 @@ void actually_print_statistics( const char* a_message,
     }
 
     last_call_second = time_spec.tv_sec;
-  }
-}
-
-
-void print_statistics( const char* a_message,
-                       const long* ap_num_events_received,
-                       const long* ap_num_packets_received )
-{
-  static long num_second_changes = -1;
-  static long last_call_second = -1;
-  static long num_initial_events_to_dismiss = 0;
-  static long num_initial_packets_to_dismiss = 0;
-
-  // This function will be called for the first time somewhere in the middle
-  // of a given second. We want that initial partial second to pass without
-  // actually printing statistics.
-  if( num_second_changes == 1 )
-  {
-    actually_print_statistics
-        ( a_message,
-          ap_num_events_received,
-          &num_initial_events_to_dismiss,
-          ap_num_packets_received,
-          &num_initial_packets_to_dismiss );
-  }
-  else
-  {
-    struct timespec time_spec;
-    if( clock_gettime( CLOCK_REALTIME, &time_spec ) == 0 )
-    {
-      if( time_spec.tv_sec != last_call_second )
-      {
-        num_second_changes++;
-      }
-
-      last_call_second = time_spec.tv_sec;
-
-      if( num_second_changes == 1 )
-      {
-        // Once the initial partial second has passed, note how many events and
-        // packets we don't want to consider when calculating number of packets
-        // and events per second (i.e. the ones that have been sent during that
-        // initial partial second).
-        num_initial_events_to_dismiss = *ap_num_events_received;
-        num_initial_packets_to_dismiss = *ap_num_packets_received;
-      }
-    }
   }
 }
 
