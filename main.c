@@ -199,7 +199,11 @@ void print_statistics( const char* a_message,
     if( time_spec.tv_sec != last_call_second )
     {
       num_seconds_from_beginning++;
-      total_latencies += message_latency( a_message, &time_spec );
+
+      if( num_seconds_from_beginning >= 1 )
+      {
+        total_latencies += message_latency( a_message, &time_spec );
+      }
 
       // Since we are printing the number of events and packets per second,
       // we need a full second to have passed in order to be able to print
