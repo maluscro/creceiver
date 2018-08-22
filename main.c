@@ -188,7 +188,6 @@ void actually_print_statistics( const char* a_message,
   static long last_call_second = -1;
   static long num_seconds_from_beginning = -1;
   static long total_latencies = 0;
-  static long num_statistics = 0;
 
   if( a_message == NULL )
   {
@@ -214,12 +213,10 @@ void actually_print_statistics( const char* a_message,
         long packets_to_consider_per_sec =
             ( *ap_num_packets_received - *ap_num_packets_to_dismiss );
 
-        num_statistics++;
-
-        printf( "%4ld Received %10ld packets (%7ld/sec), %10ld events "
-                "(%7ld/sec), events/packet: %.3lf, avg latency: %.1lf "
+        printf( "%4ld sec. Received %10ld packets (%6ld/sec), %10ld events "
+                "(%6ld/sec), events/packet: %.3lf, avg latency: %.1lf "
                 "\u00B5s\n",
-                num_statistics,
+                num_seconds_from_beginning,
                 *ap_num_packets_received,
                 packets_to_consider_per_sec /
                 num_seconds_from_beginning,
