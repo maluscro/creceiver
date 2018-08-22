@@ -14,6 +14,7 @@
 #define TIMESTAMPSIZE_BODY 19
 #define TIMESTAMPSIZE_EXTENSION 6
 #define BUFFERSIZE 64000
+#define STATISTICS_INTERVAL 1
 
 /*
  * This receiver operates over a memory buffer named g_buffer, of BUFFERSIZE
@@ -187,7 +188,6 @@ void actually_print_statistics( const char* a_message,
   static long last_call_second = -1;
   static long num_seconds_from_beginning = -1;
   static long total_latencies = 0;
-  static long num_calls = 0;
   static long num_statistics = 0;
 
   if( a_message == NULL )
@@ -199,15 +199,15 @@ void actually_print_statistics( const char* a_message,
   if( clock_gettime( CLOCK_REALTIME, &time_spec ) == 0 )
   {
     if( time_spec.tv_sec != last_call_second )
-    {
-      num_calls++;
+    {      
+      num_seconds_from_beginning++;
       total_latencies += message_latency( a_message, &time_spec );
 
       // Since we are printing the number of events and packets per second,
       // we need a full second to have passed in order to be able to print
       // meaningful info.
-      if( num_seconds_from_beginning > 0 &&
-          num_seconds_from_beginning % 2 == 0 )
+      if( num_seconds_from_beginning >= 1 &&
+          num_seconds_from_beginning % STATISTICS_INTERVAL == 0 )
       {
         long events_to_consider_per_sec =
             ( *ap_num_events_received - *ap_num_events_to_dismiss );
@@ -229,10 +229,8 @@ void actually_print_statistics( const char* a_message,
                 ( double ) *ap_num_events_received /
                 ( double ) *ap_num_packets_received,
                 ( double ) total_latencies /
-                (double ) num_calls );
+                ( double ) num_seconds_from_beginning );
       }
-
-      num_seconds_from_beginning++;
     }
 
     last_call_second = time_spec.tv_sec;
@@ -517,7 +515,7 @@ int accept_connection( int a_socket_fd )
                remote_node_address,
                sizeof remote_node_address );
 
-    printf ( "A connection request coming from %s has been accepted\n",
+    printf ( "A connection request coming from %s has been accepted\n\n",
              remote_node_address );
 
     // Close the requests socket, not needed anymore
