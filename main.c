@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
+#include <getopt.h>
 #include <netdb.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -10,11 +11,6 @@
 #define __USE_XOPEN
 #include <time.h>
 #include <unistd.h>
-
-#define TIMESTAMPSIZE_BODY 19
-#define TIMESTAMPSIZE_EXTENSION 6
-#define BUFFERSIZE 64000
-#define STATISTICS_INTERVAL 1
 
 /*
  * This receiver operates over a memory buffer named g_buffer, of BUFFERSIZE
@@ -35,13 +31,23 @@
  * swapped to the beginning.
  */
 
+#define TIMESTAMPSIZE_BODY 19
+#define TIMESTAMPSIZE_EXTENSION 6
+#define BUFFERSIZE 64000
+#define STATISTICS_INTERVAL 1
+
+struct creceiver_arguments
+{
+  char* hostname;
+  char* port;
+};
+
 static char  g_buffer[ BUFFERSIZE ];
 static char* gp_read_begin = g_buffer; // Beginning of the buffer 'read window'
 static char* gp_read_end   = g_buffer; // End of the buffer 'read window'
 
 static const char* g_error_msg =
     "It was not possible to start listening to incoming connections";
-
 
 int timestamp_rfc3339( char* ap_output_buffer )
 {
@@ -480,37 +486,137 @@ int accept_connection( int a_socket_fd )
 }
 
 
-int main( int argc, char* argv[] )
+char* trim_initial_slashes( char* a_program_name )
 {
-  if( argc != 3 )
+  char* program_name = a_program_name;
+  char* next_slash = program_name;
+  do
   {
-    fprintf( stderr, "Usage: creceiver hostname servicename\n" );
-    exit( 1 );
+    next_slash = strchr( program_name, '/' );
+
+    if( next_slash != NULL )
+    {
+      program_name = next_slash + 1;
+    }
+  }
+  while( next_slash != NULL );
+
+  return program_name;
+}
+
+
+void initialize_arguments( struct creceiver_arguments* ap_arguments )
+{
+  memset( ap_arguments, 0, sizeof( *ap_arguments ) );
+
+  ap_arguments->hostname = "127.0.0.1";
+  ap_arguments->port = "8000";
+}
+
+
+void print_usage( char* a_program_name )
+{
+  char* program_name = trim_initial_slashes( a_program_name );
+
+  struct creceiver_arguments default_arguments;
+  initialize_arguments( &default_arguments );
+
+  printf( "%s. A program that receives syslog events and prints some statistics. "
+          "Written in C using POSIX sockets.\n",
+          program_name );
+  printf( "usage:\n"
+          "    %s [option]...\n"
+          "options:\n"
+          "    -h, --help           Print this help.\n"
+          "    -H, --host <arg>     Address of the localhost to receive events from. Default: %s.\n"
+          "    -p, --port <arg>     Port to receive events from. Default: %s.\n",
+          program_name,
+          default_arguments.hostname,
+          default_arguments.port );
+}
+
+
+bool process_argument_list( int argc,
+                            char* argv[],
+                            struct creceiver_arguments* ap_arguments )
+{
+  initialize_arguments( ap_arguments );
+
+  // Process options
+  struct option long_options[] =
+  {
+  { "help", no_argument, 0, 'h' },
+  { "host", required_argument, 0, 'H' },
+  { "port", required_argument, 0, 'p' },
+  { 0, 0, 0, 0 }};
+
+  int index, opt = 0;
+  while( ( opt =
+           getopt_long( argc, argv, "hH:p:", long_options, &index ) ) != -1 )
+  {
+    switch( opt )
+    {
+      case 'h':
+      {
+        print_usage( argv[ 0 ] );
+        return false;
+      }
+      case 'H':
+      {
+        ap_arguments->hostname = optarg;
+        break;
+      }
+      case 'p':
+      {
+        ap_arguments->port = optarg;
+        break;
+      }
+      default:
+      {
+        printf( "Unknown option, or option without value.\n");
+        print_usage( argv[ 0 ] );
+        return false;
+      }
+    }
   }
 
-  int to_return = 1;
+  return true;
+}
 
-  // Create socket, and use it lo listen to incoming connection requests
-  int incoming_conns_socket_fd =
-      listen_to_connection_requests( argv[ 1 ], argv[ 2 ]);
-  if( incoming_conns_socket_fd != -1 )
+
+int main( int argc, char* argv[] )
+{  
+  struct creceiver_arguments arguments;
+  if( process_argument_list( argc, argv, &arguments ) )
   {
-    // Accept the first request. Obtain a new socket, meant to be used for
-    // communicating with the requesting endpoint.
-    int communication_socket_fd =
-        accept_connection( incoming_conns_socket_fd );
-    if( communication_socket_fd != -1 )
+    int to_return = 1;
+
+    // Create socket, and use it lo listen to incoming connection requests
+    int incoming_conns_socket_fd =
+        listen_to_connection_requests( arguments.hostname, arguments.port );
+    if( incoming_conns_socket_fd != -1 )
     {
-      // Receive events from the other endpoint...
-      receive_events( communication_socket_fd );
+      // Accept the first request. Obtain a new socket, meant to be used for
+      // communicating with the requesting endpoint.
+      int communication_socket_fd =
+          accept_connection( incoming_conns_socket_fd );
+      if( communication_socket_fd != -1 )
+      {
+        // Receive events from the other endpoint...
+        receive_events( communication_socket_fd );
 
-      close( communication_socket_fd );
+        close( communication_socket_fd );
 
-      to_return = 0;
+        to_return = 0;
+      }
+
+      close( incoming_conns_socket_fd );
     }
 
-    close( incoming_conns_socket_fd );
+    return to_return;
   }
-
-  return to_return;
+  else
+  {
+    exit( 1 );
+  }
 }
