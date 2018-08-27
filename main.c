@@ -35,7 +35,7 @@
 #define TIMESTAMPSIZE_EXTENSION 6
 #define BUFFERSIZE 64000
 #define STATISTICS_INTERVAL 1
-#define MAX_CONNECTIONS 64
+#define MAX_CONNECTIONS 128
 
 struct creceiver_arguments
 {
@@ -43,16 +43,9 @@ struct creceiver_arguments
   char* port;
 };
 
-struct receiver_data
-{
-  char  buffer[ BUFFERSIZE ]; // Buffer storing the incoming bytes
-  char* p_read_begin;         // Beginning of the buffer 'read window'
-  char* p_read_end;           // End of the buffer 'read window'
-  long  no_received_events;   // Number of events received by the receiver
-  long  no_received_packets;  // Number of packets received by the receiver
-};
-
-static struct receiver_data g_rd_array[ MAX_CONNECTIONS ];
+static char  g_buffer[ BUFFERSIZE ];
+static char* gp_read_begin = g_buffer; // Beginning of the buffer 'read window'
+static char* gp_read_end   = g_buffer; // End of the buffer 'read window'
 
 static const char* g_error_msg =
     "It was not possible to start listening to incoming connections";
@@ -129,26 +122,14 @@ long message_latency( const char* a_message,
 }
 
 
-void initialize_receiver_data_array( )
-{
-  for( int i = 0; i < MAX_CONNECTIONS; i++ )
-  {
-    g_rd_array[ i ].p_read_begin = g_rd_array[ i ].buffer;
-    g_rd_array[ i ].p_read_end = g_rd_array[ i ].buffer;
-    g_rd_array[ i ].no_received_events = 0;
-    g_rd_array[ i ].no_received_packets = 0;
-  }
-}
-
-
-char* get_event_in_buffer( int a_rcvr_id )
+char* get_event_in_buffer( )
 {
   // Is there a full event in the read window of the buffer?
   char* event_end =
-      strchr( g_rd_array[ a_rcvr_id ].p_read_begin, '\n' );
+      strchr( gp_read_begin, '\n' );
 
   if( ( event_end != NULL )  &&
-      ( event_end < g_rd_array[ a_rcvr_id ].buffer + BUFFERSIZE ) )
+      ( event_end < g_buffer + BUFFERSIZE ) )
   {
     // Replace the '\n' end mark with a null character, for the result to be
     // able to be handled as a string
@@ -156,8 +137,8 @@ char* get_event_in_buffer( int a_rcvr_id )
 
     // Return the beginning of the just found event. Update the read window of
     // the buffer, setting it just one byte after the found event.
-    char* to_return = g_rd_array[ a_rcvr_id ].p_read_begin;
-    g_rd_array[ a_rcvr_id ].p_read_begin = event_end + 1;
+    char* to_return = gp_read_begin;
+    gp_read_begin = event_end + 1;
 
     return to_return;
   }
@@ -168,60 +149,63 @@ char* get_event_in_buffer( int a_rcvr_id )
 }
 
 
-ssize_t receive_data( int a_socket_fd, int a_rcvr_id )
+ssize_t receive_data( int a_socket_fd )
 {
   // If the read window is already at the end of the buffer, swap  it to the
   // beggining of it.
   bool swapping_was_done = false;
-  if( g_rd_array[ a_rcvr_id ].p_read_end ==
-      g_rd_array[ a_rcvr_id ].buffer + BUFFERSIZE )
+  if( gp_read_end ==
+      g_buffer + BUFFERSIZE )
   {
     size_t read_window_size = ( size_t )
-                              ( g_rd_array[ a_rcvr_id ].p_read_end -
-                                g_rd_array[ a_rcvr_id ].p_read_begin );
+                              ( gp_read_end -
+                                gp_read_begin );
 
-    memmove( g_rd_array[ a_rcvr_id ].buffer,
-             g_rd_array[ a_rcvr_id ].p_read_begin,
+    memmove( g_buffer,
+             gp_read_begin,
              read_window_size );
-    g_rd_array[ a_rcvr_id ].p_read_begin =
-        g_rd_array[ a_rcvr_id ].buffer;
-    g_rd_array[ a_rcvr_id ].p_read_end =
-        g_rd_array[ a_rcvr_id ].buffer + read_window_size;
+    gp_read_begin =
+        g_buffer;
+    gp_read_end =
+        g_buffer + read_window_size;
 
     swapping_was_done = true;
   }
 
   // Receive, after the read window. Update read window definition.
   size_t max_bytes_to_receive = ( size_t )
-                                ( g_rd_array[ a_rcvr_id ].buffer +
+                                ( g_buffer +
                                   BUFFERSIZE -
-                                  g_rd_array[ a_rcvr_id ].p_read_end );
+                                  gp_read_end );
 
   ssize_t num_bytes_received =
       recv( a_socket_fd,
-            g_rd_array[ a_rcvr_id ].p_read_end,
+            gp_read_end,
             max_bytes_to_receive,
             0 );
 
   if( num_bytes_received != -1 )
   {
-    g_rd_array[ a_rcvr_id ].p_read_end += num_bytes_received;
+    gp_read_end += num_bytes_received;
   }
 
   if( swapping_was_done )
   {
     // Clear possible already consumed information
-    memset( g_rd_array[ a_rcvr_id ].p_read_end,
+    memset( gp_read_end,
             '\0',
-            ( size_t )( BUFFERSIZE - ( g_rd_array[ a_rcvr_id ].p_read_end -
-                                       g_rd_array[ a_rcvr_id ].p_read_begin )));
+            ( size_t )( BUFFERSIZE - ( gp_read_end -
+                                       gp_read_begin )));
   }
 
   return num_bytes_received;
 }
 
 
-void print_statistics( const char* a_message, int a_rcvr_id )
+void print_statistics( const char* a_message,
+                       int a_rcvr_id,
+                       const long* ap_num_events_received,
+                       const long* ap_num_packets_received )
 {
   static long last_call_second = -1;
   static long num_seconds_from_beginning = -1;
@@ -251,18 +235,18 @@ void print_statistics( const char* a_message, int a_rcvr_id )
           num_seconds_from_beginning % STATISTICS_INTERVAL == 0 )
       {
         printf( "(C%03d) %4ld sec. Received %10ld packets (%6ld/sec), %10ld "
-                "events (%6ld/sec), events/packet: %.3lf, avg latency: %.1lf "
+                "events (%6ld/sec), events/packet: %.3lf, avg lat: %.1lf "
                 "\u00B5s\n",
-                a_rcvr_id,
+                a_rcvr_id + 1,
                 num_seconds_from_beginning,
-                g_rd_array[ a_rcvr_id ].no_received_packets,
-                g_rd_array[ a_rcvr_id ].no_received_packets /
+                *ap_num_packets_received,
+                *ap_num_packets_received /
                 num_seconds_from_beginning,
-                g_rd_array[ a_rcvr_id ].no_received_events,
-                g_rd_array[ a_rcvr_id ].no_received_events /
+                *ap_num_events_received,
+                *ap_num_events_received /
                 num_seconds_from_beginning,
-                ( double ) g_rd_array[ a_rcvr_id ].no_received_events /
-                ( double ) g_rd_array[ a_rcvr_id ].no_received_packets,
+                ( double ) *ap_num_events_received /
+                ( double ) *ap_num_packets_received,
                 ( double ) total_latencies /
                 ( double ) num_seconds_from_beginning );
       }
@@ -273,23 +257,26 @@ void print_statistics( const char* a_message, int a_rcvr_id )
 }
 
 
-char* receive_full_event( int a_socket_fd, int a_rcvr_id )
+char* receive_full_event( int a_socket_fd, int a_recv_id )
 {
+  static long num_events_received = 0;
+  static long num_packets_received = 0;
+
   // Is there an event already in the buffer?
-  char* event_in_buffer = get_event_in_buffer( a_rcvr_id );
+  char* event_in_buffer = get_event_in_buffer( );
 
   // Keep receiving information until there is one, or the connection is closed
   // by the peer
   ssize_t num_bytes_received = 0;
   while( event_in_buffer == NULL )
   {
-    num_bytes_received = receive_data( a_socket_fd, a_rcvr_id );
+    num_bytes_received = receive_data( a_socket_fd );
 
     if( num_bytes_received > 0 )
     {
-      event_in_buffer = get_event_in_buffer( a_rcvr_id );
+      event_in_buffer = get_event_in_buffer( );
 
-      g_rd_array[ a_rcvr_id ].no_received_packets++;
+      num_packets_received++;
     }
     else
     {
@@ -307,9 +294,12 @@ char* receive_full_event( int a_socket_fd, int a_rcvr_id )
 
   if( event_in_buffer != NULL )
   {
-    g_rd_array[ a_rcvr_id ].no_received_events++;
+    num_events_received++;
 
-    print_statistics( event_in_buffer, a_rcvr_id );
+    print_statistics( event_in_buffer,
+                      a_recv_id,
+                      &num_events_received,
+                      &num_packets_received );
   }
 
   return event_in_buffer;
@@ -322,7 +312,8 @@ void receive_events( int a_socket_fd, int a_recv_id )
   {
     if( receive_full_event( a_socket_fd, a_recv_id ) == NULL )
     {
-      printf( "The connection has been closed by peer. Abandoning.\n\n");
+      printf( "\nThe connection C%03d has been closed by peer.\n\n",
+              a_recv_id + 1 );
       break;
     }
   }
@@ -479,7 +470,7 @@ int listen_to_connection_requests( const char* a_target_name,
 }
 
 
-int accept_connection( int a_socket_fd )
+int accept_connection( int a_socket_fd, int a_recv_id )
 {
   struct sockaddr_storage incoming_conn_socket_info;
   socklen_t incoming_conn_socket_info_size = sizeof incoming_conn_socket_info;
@@ -500,8 +491,10 @@ int accept_connection( int a_socket_fd )
                remote_node_address,
                sizeof remote_node_address );
 
-    printf ( "\nA connection request coming from %s has been accepted\n\n",
-             remote_node_address );
+    printf ( "\nA connection request coming from %s has been accepted. It is "
+             "C%03d.\n\n",
+             remote_node_address,
+             a_recv_id + 1 );
   }
   else
   {
@@ -618,7 +611,6 @@ int main( int argc, char* argv[] )
   if( process_argument_list( argc, argv, &arguments ) )
   {
     int num_receiver = 0;
-    initialize_receiver_data_array();
 
     // Create socket, and use it lo listen to incoming connection requests
     int incoming_conns_socket_fd =
@@ -630,7 +622,7 @@ int main( int argc, char* argv[] )
       while( num_receiver < MAX_CONNECTIONS )
       {
         communication_socket_fd =
-            accept_connection( incoming_conns_socket_fd );
+            accept_connection( incoming_conns_socket_fd, num_receiver );
 
         if( communication_socket_fd != -1 )
         {
@@ -641,6 +633,9 @@ int main( int argc, char* argv[] )
             close( incoming_conns_socket_fd );
 
             receive_events( communication_socket_fd, num_receiver );
+
+            close( communication_socket_fd );
+            exit( 0 );
           }
 
           close( communication_socket_fd );
